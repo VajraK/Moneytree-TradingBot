@@ -15,8 +15,6 @@ factory ... UniswapV2Factory
 
 api ... Etherscan's API
 
-url ... Etherscan's URL
-
 ---
 
 [telegram]
@@ -47,14 +45,26 @@ public_key ... Our Wallet Public Key
 
 [ether]
 
+weth_address ... WEth Adress [Mainet; Testnet]
+
 amount_of_ether ... How much Eth we want to buy for
 
-weth_address ... WEth Adress [KEEP - 0xB4FBF271143F4FBf7B91A5ded31805e42b2208d6]
-
-min_to_receive ... Min amount of tokens to receive [KEEP - 0]
+slippage ... Buy slippage. [%]
 
 ---
 
 [details]
 
 time ... Deadline for transaction
+
+---
+
+[selling]
+
+max ... How many x before sell at the top? [format e.g. 1.5]
+
+min ... How many x before sell at the bottom? [format e.g. 0.95]
+
+check_rate ... How often to check current price? [in seconds]
+
+slippage ... Sell slippage. [%]

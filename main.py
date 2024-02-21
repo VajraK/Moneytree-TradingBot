@@ -6,7 +6,6 @@ from eth_account import Account
 import json
 import configparser
 import datetime
-import requests
 import time
 
 # Read configuration file
@@ -17,7 +16,6 @@ config.read('config.ini')
 uniswap_factory_addr = config.get('uniswap', 'factory')
 uniswap_factory_address = Web3.to_checksum_address(uniswap_factory_addr)
 etherscan_api_key = config.get('etherscan', 'api')
-etherscan_url = config.get('etherscan', 'url')
 api_id = int(config.get('telegram', 'api_id'))
 api_hash = config.get('telegram', 'api_hash')
 phone_number = config.get('telegram', 'phone_number')
@@ -28,14 +26,17 @@ private_key = config.get('wallet', 'private_key')
 account = Account.from_key(private_key)
 public_key = config.get('wallet', 'public_key')
 recipient_address = Web3.to_checksum_address(public_key)
-amount_of_ether = float(config.get('ether', 'amount_of_ether'))
+amount_of_ether = float(config.get('buying', 'amount_of_ether'))
 eth_amount = web3.to_wei(amount_of_ether, 'ether')
-weth_address = config.get('ether', 'weth_address')
+weth_address = config.get('buying', 'weth_address')
 weth_ad = Web3.to_checksum_address(weth_address)
-min_to_receive = int(config.get('ether', 'min_to_receive'))
-min_tokens = min_to_receive
+buy_slippage = float(config.get('buying', 'slippage'))
 timex = int(config.get('details', 'time'))
 deadline = int(datetime.datetime.now().timestamp()) + (timex * 60)
+max_sell = float(config.get('selling', 'max'))
+min_sell = float(config.get('selling', 'min'))
+check_rate = float(config.get('selling', 'check_rate'))
+sell_slippage = float(config.get('selling', 'slippage'))
 
 
 # Load the Uniswap V2 Router Contract ABI
@@ -62,19 +63,19 @@ uniswap_factory_abi = json.loads('[{"constant":true,"inputs":[{"internalType":"a
 factory_contract = web3.eth.contract(address=uniswap_factory_address, abi=uniswap_factory_abi)
 
 
-# Get transaction details
-def get_transaction_details(ether_url, txn_hash, api_key):
-    url = f"https://{ether_url}/api?module=proxy&action=eth_getTransactionByHash&txhash={txn_hash}&apikey={api_key}"
-    response = requests.get(url)
-    return response.json()
+def get_token_decimals(token_contract):
+    return token_contract.functions.decimals().call()
 
 
 # Getting token price
-def get_current_token_price(token_contract_address, pair_contract):
+def get_current_token_price(token_contract_address, pair_contract, token_contract):
     reserves = pair_contract.functions.getReserves().call()
+    token_decimals = get_token_decimals(token_contract)
     reserve_token = reserves[0] if token_contract_address.lower() < weth_ad.lower() else reserves[1]
     reserve_weth = reserves[1] if token_contract_address.lower() < weth_ad.lower() else reserves[0]
-    price_of_token_in_weth = reserve_weth / reserve_token
+    adjusted_reserve_token = reserve_token / (10 ** token_decimals)
+    adjusted_reserve_weth = reserve_weth / (10 ** 18)
+    price_of_token_in_weth = adjusted_reserve_weth / adjusted_reserve_token
     return price_of_token_in_weth
 
 
@@ -145,8 +146,32 @@ async def my_event_handler(event):
                         token_contract_address_checked = Web3.to_checksum_address(token_contract_address)
                         swap_path = [weth_ad, token_contract_address_checked]
 
+                        # Get token price at time of Buy
+                        pair_address = (factory_contract.functions.getPair(token_contract_address_checked, weth_ad).
+                                        call())
+                        if pair_address != "0x0000000000000000000000000000000000000000":
+                            print(f"Pair address: {pair_address}")
+                        else:
+                            print("Pair does not exist.")
+                        pair_contract = web3.eth.contract(address=pair_address, abi=uniswap_v2_pair_abi)
+                        token_contract = web3.eth.contract(address=token_contract_address_checked,
+                                                           abi=uniswap_v2_erc20_abi)
+                        token_decimals = token_contract.functions.decimals().call()
+                        buy_price = get_current_token_price(token_contract_address_checked, pair_contract,
+                                                            token_contract)
+                        mi_tokens_h = amount_of_ether / buy_price * (1 - buy_slippage)
+                        mi_tokens = int(mi_tokens_h * 10 ** token_decimals)
+                        print("---------")
+                        print("---BUY---")
+                        print(f"Current price: {buy_price}")
+                        print(f"Decimal: {token_decimals}")
+                        print(f"Eth to buy with: {amount_of_ether}")
+                        print(f"Slippage: {buy_slippage}")
+                        print(f"Will receive at least: {mi_tokens_h} tokens.")
+                        print("Buying tokens...")
+
                         txn = uniswap_v2_router_contract.functions.swapExactETHForTokens(
-                            min_tokens,
+                            mi_tokens,
                             swap_path,
                             recipient_address,
                             deadline
@@ -161,42 +186,62 @@ async def my_event_handler(event):
                         signed_txn = web3.eth.account.sign_transaction(txn, private_key=private_key)
                         txn_receipt = web3.eth.send_raw_transaction(signed_txn.rawTransaction)
                         txn_hash = web3.to_hex(txn_receipt)
-                        print(f"TRANSACTION SUBMITTED. Hash: {txn_hash}")
-
-                        # Get transaction details
-                        transaction_details = get_transaction_details(etherscan_url, txn_hash, etherscan_api_key)
-                        print(f"Transactions details: {transaction_details}")
-
-                        # Get token price at time of Buy
-                        pair_address = (factory_contract.functions.getPair(token_contract_address_checked, weth_ad).
-                                        call())
-                        if pair_address != "0x0000000000000000000000000000000000000000":
-                            print(f"Pair address: {pair_address}")
-                        else:
-                            print("Pair does not exist.")
-                        pair_contract = web3.eth.contract(address=pair_address, abi=uniswap_v2_pair_abi)
-                        buy_price = get_current_token_price(token_contract_address_checked, pair_contract)
-                        print(f"Buy price of token in WETH: {buy_price}")
+                        print(f"Buy transaction submitted. Hash: {txn_hash}")
+                        print("---------")
+                        print("---------")
 
                         # Waiting for 1.5x or 0.95x
-                        print("Waiting for 1.5x or 0.95x!")
+                        print(f"Waiting for {max_sell}x or {min_sell}x!")
                         while True:
-                            current_price = get_current_token_price(token_contract_address_checked, pair_contract)
-                            if current_price >= 1.5 * buy_price or current_price <= 0.95 * buy_price:
-                                print("Condition met for selling the token.")
+                            current_price = get_current_token_price(token_contract_address_checked, pair_contract,
+                                                                    token_contract)
+                            if current_price >= max_sell * buy_price:
+                                print(f"Condition met for selling the token. ({max_sell}x)")
+                                print("----------")
+                                print("---SELL---")
+                                print(f"Current price: {current_price}")
                                 token_balance_to_sell = get_token_balance(token_contract_address_checked,
                                                                           recipient_address)
-                                print(f"Token balance to sell: {token_balance_to_sell}")
-                                print("Approving Uniswap router to spend tokens...")
+                                token_balance_to_sell_h = token_balance_to_sell / 10**token_decimals
+                                print(f"Token balance to sell: {token_balance_to_sell_h}")
+                                print(f"Slippage: {sell_slippage}")
                                 approve_token(token_contract_address_checked, uniswap_v2_router_address,
                                               token_balance_to_sell)
+                                min_eth_to_receive = int(token_balance_to_sell * current_price * (1 - sell_slippage))
+                                min_eth_to_receive_h = min_eth_to_receive / 10**token_decimals
+                                print(f"Will receive at least: {min_eth_to_receive_h} eth.")
                                 print("Selling tokens...")
-                                min_eth_to_receive = 0
                                 sell_txn_hash = sell_token(token_contract_address_checked, token_balance_to_sell,
                                                            min_eth_to_receive, deadline)
                                 print(f"Sell transaction submitted. Hash: {sell_txn_hash}")
+                                print("----------")
+                                print("----------")
+
                                 break
-                            time.sleep(5)
+                            elif current_price <= min_sell * buy_price:
+                                print(f"Condition met for selling the token. ({min_sell}x)")
+                                print("----------")
+                                print("---SELL---")
+                                print(f"Current price: {current_price}")
+                                token_balance_to_sell = get_token_balance(token_contract_address_checked,
+                                                                          recipient_address)
+                                token_balance_to_sell_h = token_balance_to_sell / 10**token_decimals
+                                print(f"Token balance to sell: {token_balance_to_sell_h}")
+                                print(f"Slippage: {sell_slippage}")
+                                approve_token(token_contract_address_checked, uniswap_v2_router_address,
+                                              token_balance_to_sell)
+                                min_eth_to_receive = int(token_balance_to_sell * current_price * (1 - sell_slippage))
+                                min_eth_to_receive_h = min_eth_to_receive / 10**token_decimals
+                                print(f"Will receive at least: {min_eth_to_receive_h} eth.")
+                                print("Selling tokens...")
+                                sell_txn_hash = sell_token(token_contract_address_checked, token_balance_to_sell,
+                                                           min_eth_to_receive, deadline)
+                                print(f"Sell transaction submitted. Hash: {sell_txn_hash}")
+                                print("----------")
+                                print("----------")
+                                break
+                            print(f"working... {current_price}")
+                            time.sleep(check_rate)
 
 
 def main():
